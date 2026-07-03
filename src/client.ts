@@ -1,16 +1,23 @@
 /**
- * Script client-side injetado em toda página.
- * Carrega o manifesto e registra tools WebMCP via document.modelContext.
+ * Client-side script injected into every page.
+ * Loads the manifest and registers WebMCP tools via document.modelContext.
  *
- * Segurança aplicada conforme Chrome Agent Security Guidelines:
- * - readOnlyHint em todas as tools que não mutam estado
- * - untrustedContentHint em tools que retornam conteúdo de páginas
- * - Limite de caracteres nos outputs (previne context overflow)
- * - Sanitização contra indirect prompt injection
- * - exposedTo para controle cross-origin
+ * Conforms to the WebMCP spec (webmachinelearning/webmcp) as of 2026-07:
+ * - document.modelContext as primary API surface
+ * - provideContext() batch registration with registerTool() fallback
+ * - AbortController / signal for tool lifecycle management
+ * - requestUserInteraction() for state-mutating tools
+ * - Structured content response format with string fallback
  *
+ * Security applied per Chrome Agent Security Guidelines:
+ * - readOnlyHint on all non-mutating tools
+ * - untrustedContentHint on tools returning page content
+ * - Output character limit (prevents context overflow)
+ * - Sanitization against indirect prompt injection
+ * - exposedTo for cross-origin control
+ *
+ * @see https://webmachinelearning.github.io/webmcp/
  * @see https://developer.chrome.com/docs/ai/webmcp/secure-tools
- * @see https://developer.chrome.com/docs/agents/security
  */
 
 interface ManifestEntry {
@@ -27,22 +34,22 @@ interface Manifest {
   entries: ManifestEntry[];
 }
 
-/** Config injetada pelo integration via __WEBMCP_CONFIG__ */
+/** Config injected by the integration via __WEBMCP_CONFIG__ */
 interface WebMCPClientConfig {
   exposedTo?: string[];
   maxOutputLength: number;
   sanitizeOutputs: boolean;
 }
 
-// Config é substituída no build pelo integration
+// Config is replaced at build time by the integration
 const CONFIG: WebMCPClientConfig = (globalThis as any).__WEBMCP_CONFIG__ ?? {
   maxOutputLength: 1500,
   sanitizeOutputs: true,
 };
 
 /**
- * Trunca output respeitando o limite de caracteres.
- * Previne context window overflow no agent (guardrail determinístico).
+ * Truncates output to the character limit.
+ * Prevents context window overflow in the agent (deterministic guardrail).
  */
 function truncateOutput(str: string, max: number): string {
   if (str.length <= max) return str;
@@ -50,31 +57,34 @@ function truncateOutput(str: string, max: number): string {
 }
 
 /**
- * Sanitiza conteúdo para mitigar indirect prompt injection.
- * Remove padrões comuns de instruções embutidas em conteúdo.
+ * Sanitizes content to mitigate indirect prompt injection.
+ * Strips common instruction patterns embedded in content.
  */
 function sanitize(text: string): string {
   if (!CONFIG.sanitizeOutputs) return text;
   return text
-    // Remove padrões de "ignore previous instructions"
     .replace(/ignore\s+(all\s+)?(previous|above|prior)\s+(instructions?|prompts?|rules?)/gi, '[filtered]')
-    // Remove tentativas de role-play/system prompt injection
     .replace(/you\s+are\s+(now|a)\s+/gi, '[filtered]')
     .replace(/(system|assistant|user)\s*:\s*/gi, '[filtered]')
-    // Remove marcadores de instruções
     .replace(/<\/?(?:system|instruction|prompt|command)[^>]*>/gi, '[filtered]');
 }
 
 /**
- * Envelopa output com sanitização e truncamento.
+ * Wraps output with sanitization and truncation.
+ * Returns structured content format per spec when supported,
+ * falls back to plain string for older Chrome implementations.
  */
-function safeOutput(data: unknown): string {
+function safeOutput(data: unknown): { content: Array<{ type: string; text: string }> } | string {
   let str = JSON.stringify(data);
   str = sanitize(str);
-  return truncateOutput(str, CONFIG.maxOutputLength);
+  str = truncateOutput(str, CONFIG.maxOutputLength);
+  // Structured content response per spec (content array with typed parts)
+  return { content: [{ type: 'text', text: str }] };
 }
 
 (async () => {
+  // document.modelContext is the spec-canonical API surface.
+  // navigator.modelContext is the Chrome 149 early trial fallback.
   const mc = (document as any).modelContext ?? (navigator as any).modelContext;
   if (!mc?.registerTool) return;
 
@@ -87,18 +97,27 @@ function safeOutput(data: unknown): string {
     return;
   }
 
-  // Opções de registro compartilhadas (exposedTo para cross-origin control)
-  const registerOptions = CONFIG.exposedTo?.length
-    ? { exposedTo: CONFIG.exposedTo }
-    : undefined;
+  // AbortController for tool lifecycle — abort() unregisters all tools.
+  // Useful for SPA navigations, View Transitions, or conditional tool availability.
+  const controller = new AbortController();
+  const { signal } = controller;
 
-  // Tool: buscar conteúdo
-  mc.registerTool({
+  // Shared registration options
+  const registerOptions: Record<string, unknown> = { signal };
+  if (CONFIG.exposedTo?.length) {
+    registerOptions.exposedTo = CONFIG.exposedTo;
+  }
+
+  // Collect all tool definitions for batch registration via provideContext()
+  const tools: Array<Record<string, unknown>> = [];
+
+  // Tool: search content
+  tools.push({
     name: 'search_content',
     description: 'Search articles and pages on this site by keyword. Returns title, URL, and description of matching results.',
     annotations: {
       readOnlyHint: true,
-      untrustedContentHint: true, // Conteúdo vem de páginas que podem ter UGC
+      untrustedContentHint: true,
     },
     inputSchema: {
       type: 'object',
@@ -111,7 +130,7 @@ function safeOutput(data: unknown): string {
     },
     execute: async (args: { query: string; collection?: string; limit?: number }) => {
       const q = args.query.toLowerCase();
-      const limit = Math.min(args.limit ?? 5, 20); // Cap máximo de resultados
+      const limit = Math.min(args.limit ?? 5, 20);
       let results = manifest.entries.filter(
         (e) =>
           e.title.toLowerCase().includes(q) ||
@@ -123,10 +142,10 @@ function safeOutput(data: unknown): string {
       }
       return safeOutput(results.slice(0, limit));
     },
-  }, registerOptions);
+  });
 
-  // Tool: listar collections/seções
-  mc.registerTool({
+  // Tool: list collections / sections
+  tools.push({
     name: 'list_sections',
     description: 'List all content sections (collections) available on this site with item counts.',
     annotations: {
@@ -134,14 +153,14 @@ function safeOutput(data: unknown): string {
     },
     inputSchema: { type: 'object', properties: {} },
     execute: async () => safeOutput(manifest.collections),
-  }, registerOptions);
+  });
 
-  // Tool: navegar para conteúdo
-  mc.registerTool({
+  // Tool: navigate to content (state-mutating — requires requestUserInteraction)
+  tools.push({
     name: 'go_to',
     description: 'Navigate to a specific page on this site by its slug.',
     annotations: {
-      readOnlyHint: false, // Altera estado (navegação)
+      readOnlyHint: false,
     },
     inputSchema: {
       type: 'object',
@@ -154,21 +173,32 @@ function safeOutput(data: unknown): string {
       const entry = manifest.entries.find(
         (e) => e.slug === args.slug || e.url === args.slug || e.url === `/${args.slug}/`,
       );
-      if (entry) {
-        window.location.href = entry.url;
-        return null;
+      if (!entry) {
+        return safeOutput({ error: 'Page not found. Use search_content to find available pages.' });
       }
-      return 'Page not found. Use search_content to find available pages.';
-    },
-  }, registerOptions);
 
-  // Tool: obter conteúdo da página atual
-  mc.registerTool({
+      // Spec requirement: state-mutating tools must request user consent.
+      if (mc.requestUserInteraction) {
+        const approved = await mc.requestUserInteraction({
+          message: `Navigate to "${entry.title}" (${entry.url})?`,
+        });
+        if (!approved) {
+          return safeOutput({ cancelled: true, message: 'Navigation cancelled by user.' });
+        }
+      }
+
+      window.location.href = entry.url;
+      return null;
+    },
+  });
+
+  // Tool: get current page metadata
+  tools.push({
     name: 'get_page_info',
-    description: 'Get metadata about the current page (title, description, headings).',
+    description: 'Get metadata about the current page (title, description, headings, language, word count, canonical URL).',
     annotations: {
       readOnlyHint: true,
-      untrustedContentHint: true, // DOM pode conter UGC (comentários, etc)
+      untrustedContentHint: true,
     },
     inputSchema: { type: 'object', properties: {} },
     execute: async () => {
@@ -178,8 +208,32 @@ function safeOutput(data: unknown): string {
       const headings = Array.from(document.querySelectorAll('h1, h2, h3')).map((h) => ({
         level: parseInt(h.tagName[1]),
         text: h.textContent?.trim() ?? '',
+        ...(h.id ? { id: h.id } : {}),
       }));
-      return safeOutput({ title, description, headings, url: window.location.pathname });
+      const lang = document.documentElement.lang || undefined;
+      const canonical =
+        document.querySelector('link[rel="canonical"]')?.getAttribute('href') || undefined;
+
+      return safeOutput({
+        title,
+        description,
+        headings,
+        url: window.location.pathname,
+        lang,
+        canonical,
+      });
     },
-  }, registerOptions);
+  });
+
+  // Register tools: prefer provideContext() batch (spec-preferred), fallback to registerTool()
+  if (mc.provideContext) {
+    mc.provideContext({ tools }, registerOptions);
+  } else {
+    for (const tool of tools) {
+      mc.registerTool(tool, registerOptions);
+    }
+  }
+
+  // Expose abort for cleanup (e.g., SPA navigation, View Transitions)
+  (globalThis as any).__WEBMCP_ABORT__ = () => controller.abort();
 })();

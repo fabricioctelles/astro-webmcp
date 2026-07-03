@@ -1,18 +1,19 @@
 {
   "name": "astro-webmcp",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Astro integration that exposes your site content via WebMCP for AI agents",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./middleware": "./dist/middleware.mjs"
   },
   "types": "./dist/index.d.ts",
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/middleware.mjs dist/middleware.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -35,10 +36,11 @@
   },
   "license": "MIT",
   "peerDependencies": {
-    "astro": "^6.0.0"
+    "astro": "^6.0.0 || ^7.0.0"
   },
   "devDependencies": {
-    "astro": "^6.0.0",
+    "@types/node": "^26.0.0",
+    "astro": "^7.0.0",
     "typescript": "^5.8.0"
   }
 }

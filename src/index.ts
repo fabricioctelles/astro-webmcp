@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { SecurityOptions, WebMCPManifest, WebMCPOptions } from './types.js';
 
-export type { WebMCPOptions, CustomTool, ManifestEntry, WebMCPManifest, SecurityOptions, ToolAnnotations } from './types.js';
+export type { WebMCPOptions, CustomTool, ManifestEntry, WebMCPManifest, SecurityOptions, ToolAnnotations, ToolContentResponse } from './types.js';
 
 /**
  * Astro integration que expõe conteúdo do site via WebMCP.
@@ -13,37 +13,49 @@ export type { WebMCPOptions, CustomTool, ManifestEntry, WebMCPManifest, Security
  * No build: gera /_webmcp/manifest.json com metadados das páginas.
  * No browser: injeta script que registra tools via document.modelContext.
  *
- * Segurança aplicada conforme Chrome Agent Security Guidelines:
- * - Annotations (readOnlyHint, untrustedContentHint) em todas as tools
- * - Limite de caracteres nos outputs (previne context overflow)
- * - Sanitização contra indirect prompt injection
- * - Controle cross-origin via exposedTo
+ * v7 features (auto-detected, inactive on v6):
+ * - Route caching on manifest endpoint (if cache provider configured)
+ * - Heading IDs extraction (Sätteri generates them by default)
+ * - Agent Skills Discovery (/.well-known/skills/index.json)
  *
  * @see https://developer.chrome.com/docs/ai/webmcp/secure-tools
  * @see https://developer.chrome.com/docs/agents/security
  */
 export default function astroWebMCP(options: WebMCPOptions = {}): AstroIntegration {
   let siteUrl: string | undefined;
+  let hasRouteCaching = false;
+  let isSSR = false;
+
   const security: Required<SecurityOptions> = {
     exposedTo: options.security?.exposedTo ?? [],
     maxOutputLength: options.security?.maxOutputLength ?? 1500,
     sanitizeOutputs: options.security?.sanitizeOutputs ?? true,
   };
 
-  // Lê o script client como string para injetar
   const clientPath = join(dirname(fileURLToPath(import.meta.url)), 'client.js');
 
   return {
     name: 'astro-webmcp',
 
     hooks: {
-      'astro:config:setup': ({ config, injectScript, logger }) => {
+      'astro:config:setup': ({ config, injectScript, logger, addMiddleware }) => {
         siteUrl = config.site;
 
-        // Injeta a config de segurança antes do client
+        // Feature detection: route caching (v7 stable, v6 experimental)
+        const cfg = config as unknown as Record<string, unknown>;
+        hasRouteCaching = !!(cfg.cache && typeof cfg.cache === 'object');
+        isSSR = config.output !== 'static';
+
+        // v7: register middleware for dynamic manifest in SSR mode
+        if (isSSR && typeof addMiddleware === 'function') {
+          addMiddleware({
+            entrypoint: fileURLToPath(new URL('./middleware.mjs', import.meta.url)),
+            order: 'pre',
+          });
+        }
+
         const configScript = `globalThis.__WEBMCP_CONFIG__=${JSON.stringify(security)};`;
 
-        // Lê o script client compilado e injeta em toda página
         let clientCode: string;
         try {
           clientCode = readFileSync(clientPath, 'utf-8');
@@ -51,8 +63,12 @@ export default function astroWebMCP(options: WebMCPOptions = {}): AstroIntegrati
           clientCode = getInlineClient();
         }
 
-        injectScript('page', configScript + clientCode);
-        logger.info('WebMCP tools registered with security annotations');
+        injectScript('head-inline', configScript + clientCode);
+
+        const features: string[] = [];
+        if (hasRouteCaching) features.push('route-caching');
+        if (isSSR) features.push('ssr-manifest');
+        logger.info(`WebMCP registered${features.length ? ` [${features.join(', ')}]` : ''}`);
       },
 
       'astro:server:setup': ({ server, logger }) => {
@@ -66,14 +82,14 @@ export default function astroWebMCP(options: WebMCPOptions = {}): AstroIntegrati
             ],
           };
           res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'no-cache');
           res.end(JSON.stringify(manifest));
         });
-        logger.info('WebMCP dev manifest available at /_webmcp/manifest.json');
+        logger.info('WebMCP dev manifest at /_webmcp/manifest.json');
       },
 
       'astro:build:done': async ({ dir, pages, logger }) => {
         const collectionsFilter = options.collections;
-
         const collectionMap = new Map<string, number>();
         const entries: WebMCPManifest['entries'] = [];
 
@@ -90,13 +106,12 @@ export default function astroWebMCP(options: WebMCPOptions = {}): AstroIntegrati
 
           const slug = pathname.replace(/\/$/, '') || '/';
           const url = '/' + pathname;
-          const { title, description } = extractMeta(dir, pathname);
+          const meta = extractMeta(dir, pathname);
 
           entries.push({
             slug,
             url,
-            title,
-            description,
+            ...meta,
             collection: segments.length > 0 ? collection : undefined,
           });
         }
@@ -110,18 +125,75 @@ export default function astroWebMCP(options: WebMCPOptions = {}): AstroIntegrati
           entries,
         };
 
-        const outPath = join(fileURLToPath(dir), '_webmcp', 'manifest.json');
-        await mkdir(dirname(outPath), { recursive: true });
-        await writeFile(outPath, JSON.stringify(manifest, null, 2));
+        const outDir = fileURLToPath(dir);
 
-        logger.info(`WebMCP manifest generated: ${entries.length} entries, ${manifest.collections.length} collections`);
+        // Write manifest
+        const manifestPath = join(outDir, '_webmcp', 'manifest.json');
+        await mkdir(dirname(manifestPath), { recursive: true });
+        await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+        // Agent Skills Discovery: generate /.well-known/skills/index.json
+        if (options.skills !== false) {
+          const skillsIndex = buildSkillsIndex(siteUrl, manifest, options);
+          const skillsPath = join(outDir, '.well-known', 'skills', 'index.json');
+          await mkdir(dirname(skillsPath), { recursive: true });
+          await writeFile(skillsPath, JSON.stringify(skillsIndex, null, 2));
+          logger.info(`Agent Skills Discovery: /.well-known/skills/index.json`);
+        }
+
+        logger.info(`WebMCP manifest: ${entries.length} entries, ${manifest.collections.length} collections`);
       },
     },
   };
 }
 
-/** Extrai title e description do HTML gerado */
-function extractMeta(dir: URL, pathname: string): { title: string; description: string } {
+/** Builds /.well-known/skills/index.json for Agent Skills Discovery RFC */
+function buildSkillsIndex(
+  siteUrl: string | undefined,
+  manifest: WebMCPManifest,
+  options: WebMCPOptions,
+) {
+  const base = siteUrl?.replace(/\/$/, '') ?? '';
+  const skills: Array<Record<string, unknown>> = [
+    {
+      name: 'search-site-content',
+      description: `Search articles and pages on ${base || 'this site'} by keyword. Returns title, URL, and description.`,
+      url: `${base}/_webmcp/manifest.json`,
+      transport: 'webmcp',
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: 'browse-site-sections',
+      description: `List content sections available: ${manifest.collections.map(c => c.name).join(', ') || 'all pages'}.`,
+      url: `${base}/_webmcp/manifest.json`,
+      transport: 'webmcp',
+      annotations: { readOnlyHint: true },
+    },
+  ];
+
+  // Add custom skills from options
+  if (options.customTools) {
+    for (const tool of options.customTools) {
+      skills.push({
+        name: tool.name,
+        description: tool.description,
+        url: `${base}/_webmcp/manifest.json`,
+        transport: 'webmcp',
+        annotations: tool.annotations,
+      });
+    }
+  }
+
+  return {
+    version: '1.0',
+    name: options.skillsName ?? 'WebMCP Tools',
+    description: options.skillsDescription ?? `AI-accessible tools for ${base || 'this site'}`,
+    skills,
+  };
+}
+
+/** Extracts title, description, and heading IDs from generated HTML */
+function extractMeta(dir: URL, pathname: string): { title: string; description: string; headings?: Array<{ id: string; text: string; level: number }> } {
   try {
     const htmlPath = join(fileURLToPath(dir), pathname, 'index.html');
     const html = readFileSync(htmlPath, 'utf-8');
@@ -129,9 +201,18 @@ function extractMeta(dir: URL, pathname: string): { title: string; description: 
     const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
     const descMatch = html.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i);
 
+    // v7 Sätteri generates heading IDs by default — extract them for deep-linking
+    const headings: Array<{ id: string; text: string; level: number }> = [];
+    const headingRegex = /<h([1-3])\s+id=["']([^"']+)["'][^>]*>([^<]+)<\/h\1>/gi;
+    let match: RegExpExecArray | null;
+    while ((match = headingRegex.exec(html)) !== null) {
+      headings.push({ level: parseInt(match[1]), id: match[2], text: match[3].trim() });
+    }
+
     return {
       title: titleMatch?.[1]?.trim() ?? pathname.split('/').filter(Boolean).pop() ?? 'Home',
       description: descMatch?.[1]?.trim() ?? '',
+      ...(headings.length > 0 ? { headings } : {}),
     };
   } catch {
     return {
@@ -141,7 +222,7 @@ function extractMeta(dir: URL, pathname: string): { title: string; description: 
   }
 }
 
-/** Client inline mínimo como fallback — com segurança aplicada */
+/** Client inline mínimo como fallback */
 function getInlineClient(): string {
-  return `(async()=>{const C=globalThis.__WEBMCP_CONFIG__||{maxOutputLength:1500,sanitizeOutputs:true};const mc=document.modelContext||navigator.modelContext;if(!mc?.registerTool)return;let m;try{const r=await fetch("/_webmcp/manifest.json");if(!r.ok)return;m=await r.json()}catch{return}function sn(t){if(!C.sanitizeOutputs)return t;return t.replace(/ignore\\s+(all\\s+)?(previous|above|prior)\\s+(instructions?|prompts?|rules?)/gi,"[filtered]").replace(/you\\s+are\\s+(now|a)\\s+/gi,"[filtered]").replace(/(system|assistant|user)\\s*:\\s*/gi,"[filtered]").replace(/<\\/?(?:system|instruction|prompt|command)[^>]*>/gi,"[filtered]")}function so(d){let s=JSON.stringify(d);s=sn(s);if(s.length>C.maxOutputLength)s=s.slice(0,C.maxOutputLength-13)+"...[truncated]";return s}const opts=C.exposedTo?.length?{exposedTo:C.exposedTo}:undefined;mc.registerTool({name:"search_content",description:"Search articles and pages on this site by keyword.",annotations:{readOnlyHint:true,untrustedContentHint:true},inputSchema:{type:"object",properties:{query:{type:"string",description:"Search term"},collection:{type:"string",description:"Filter by collection (optional)"},limit:{type:"number",description:"Max results (default: 5)"}},required:["query"]},execute:async({query:q,collection:c,limit:l=5})=>{const t=q.toLowerCase();let r=m.entries.filter(e=>e.title.toLowerCase().includes(t)||(e.description||"").toLowerCase().includes(t));if(c)r=r.filter(e=>e.collection===c);return so(r.slice(0,Math.min(l,20)))}},opts);mc.registerTool({name:"list_sections",description:"List content sections available on this site.",annotations:{readOnlyHint:true},inputSchema:{type:"object",properties:{}},execute:async()=>so(m.collections)},opts);mc.registerTool({name:"go_to",description:"Navigate to a page by slug.",annotations:{readOnlyHint:false},inputSchema:{type:"object",properties:{slug:{type:"string",description:"Page slug or path"}},required:["slug"]},execute:async({slug:s})=>{const e=m.entries.find(x=>x.slug===s||x.url===s||x.url==="/"+s+"/");if(e){window.location.href=e.url;return null}return"Not found"}},opts);mc.registerTool({name:"get_page_info",description:"Get current page metadata.",annotations:{readOnlyHint:true,untrustedContentHint:true},inputSchema:{type:"object",properties:{}},execute:async()=>so({title:document.title,description:document.querySelector('meta[name="description"]')?.getAttribute("content")||"",url:location.pathname})},opts)})();`;
+  return `(async()=>{const C=globalThis.__WEBMCP_CONFIG__||{maxOutputLength:1500,sanitizeOutputs:true};const mc=document.modelContext||navigator.modelContext;if(!mc?.registerTool)return;let m;try{const r=await fetch("/_webmcp/manifest.json");if(!r.ok)return;m=await r.json()}catch{return}function sn(t){if(!C.sanitizeOutputs)return t;return t.replace(/ignore\\s+(all\\s+)?(previous|above|prior)\\s+(instructions?|prompts?|rules?)/gi,"[filtered]").replace(/you\\s+are\\s+(now|a)\\s+/gi,"[filtered]").replace(/(system|assistant|user)\\s*:\\s*/gi,"[filtered]").replace(/<\\/?(?:system|instruction|prompt|command)[^>]*>/gi,"[filtered]")}function so(d){let s=JSON.stringify(d);s=sn(s);if(s.length>C.maxOutputLength)s=s.slice(0,C.maxOutputLength-13)+"...[truncated]";return{content:[{type:"text",text:s}]}}const ac=new AbortController();const opts={signal:ac.signal,...(C.exposedTo?.length?{exposedTo:C.exposedTo}:{})};const tools=[{name:"search_content",description:"Search articles and pages on this site by keyword.",annotations:{readOnlyHint:true,untrustedContentHint:true},inputSchema:{type:"object",properties:{query:{type:"string",description:"Search term"},collection:{type:"string",description:"Filter by collection (optional)"},limit:{type:"number",description:"Max results (default: 5)"}},required:["query"]},execute:async({query:q,collection:c,limit:l=5})=>{const t=q.toLowerCase();let r=m.entries.filter(e=>e.title.toLowerCase().includes(t)||(e.description||"").toLowerCase().includes(t)||(e.tags||[]).some(tg=>tg.toLowerCase().includes(t)));if(c)r=r.filter(e=>e.collection===c);return so(r.slice(0,Math.min(l,20)))}},{name:"list_sections",description:"List content sections available on this site.",annotations:{readOnlyHint:true},inputSchema:{type:"object",properties:{}},execute:async()=>so(m.collections)},{name:"go_to",description:"Navigate to a page by slug.",annotations:{readOnlyHint:false},inputSchema:{type:"object",properties:{slug:{type:"string",description:"Page slug or path"}},required:["slug"]},execute:async({slug:s})=>{const e=m.entries.find(x=>x.slug===s||x.url===s||x.url==="/"+s+"/");if(!e)return so({error:"Page not found. Use search_content to find available pages."});if(mc.requestUserInteraction){const ok=await mc.requestUserInteraction({message:"Navigate to \\""+e.title+"\\" ("+e.url+")?"});if(!ok)return so({cancelled:true,message:"Navigation cancelled by user."})}window.location.href=e.url;return null}},{name:"get_page_info",description:"Get current page metadata.",annotations:{readOnlyHint:true,untrustedContentHint:true},inputSchema:{type:"object",properties:{}},execute:async()=>{const h=Array.from(document.querySelectorAll("h1,h2,h3")).map(x=>({level:parseInt(x.tagName[1]),text:x.textContent?.trim()||"",...(x.id?{id:x.id}:{})}));return so({title:document.title,description:document.querySelector('meta[name="description"]')?.getAttribute("content")||"",headings:h,url:location.pathname,lang:document.documentElement.lang||undefined,canonical:document.querySelector('link[rel="canonical"]')?.getAttribute("href")||undefined})}}];if(mc.provideContext){mc.provideContext({tools},opts)}else{for(const t of tools)mc.registerTool(t,opts)}globalThis.__WEBMCP_ABORT__=()=>ac.abort()})();`;
 }

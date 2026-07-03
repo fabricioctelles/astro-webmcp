@@ -1,55 +1,81 @@
-/** Opções de configuração do astro-webmcp */
+/** Configuration options for astro-webmcp */
 export interface WebMCPOptions {
-  /** Collections a expor (default: todas as que tiverem páginas) */
+  /** Collections to expose (default: all that have pages) */
   collections?: string[];
-  /** Tools customizados adicionais */
+  /** Additional custom tools */
   customTools?: CustomTool[];
-  /** Opções de segurança */
+  /** Security options */
   security?: SecurityOptions;
+  /**
+   * Generate /.well-known/skills/index.json for Agent Skills Discovery.
+   * Set to false to disable. Default: true.
+   * Only generated at build time (static output).
+   */
+  skills?: boolean;
+  /** Name for the skills index (default: "WebMCP Tools") */
+  skillsName?: string;
+  /** Description for the skills index */
+  skillsDescription?: string;
 }
 
-/** Opções de segurança do WebMCP (baseado em Chrome Agent Security Guidelines) */
+/**
+ * Security options per Chrome Agent Security Guidelines.
+ * @see https://developer.chrome.com/docs/ai/webmcp/secure-tools
+ */
 export interface SecurityOptions {
   /**
-   * Origens permitidas para acessar as tools via exposedTo.
-   * Default: undefined (apenas same-origin, mais seguro).
-   * @see https://developer.chrome.com/docs/ai/webmcp/secure-tools
+   * Origins allowed to access tools via exposedTo.
+   * Default: undefined (same-origin only, most secure).
    */
   exposedTo?: string[];
   /**
-   * Limite máximo de caracteres no output de cada tool.
-   * Previne context window overflow e reduz superfície para prompt injection.
-   * Default: 1500 (recomendação Chrome: 1.5K chars por output)
+   * Maximum character limit per tool output.
+   * Prevents context window overflow and reduces prompt injection surface.
+   * Default: 1500 (Chrome recommendation)
    */
   maxOutputLength?: number;
   /**
-   * Ativa sanitização de outputs para mitigar indirect prompt injection.
-   * Remove padrões que parecem instruções para LLMs no conteúdo.
+   * Enables output sanitization to mitigate indirect prompt injection.
+   * Strips patterns that resemble LLM instructions from content.
    * Default: true
    */
   sanitizeOutputs?: boolean;
 }
 
-/** Tool customizado definido pelo usuário */
+/** User-defined custom tool */
 export interface CustomTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  /** Corpo da função execute serializado (roda no browser) */
+  /**
+   * Optional output schema (spec draft, Issue #9).
+   * Declares the structure of the tool's return value for agent validation.
+   * Not yet enforced by Chrome — included for forward compatibility.
+   */
+  outputSchema?: Record<string, unknown>;
+  /** Serialized execute function body (runs in browser) */
   executeBody: string;
-  /** Annotations de segurança */
+  /** Security annotations */
   annotations?: ToolAnnotations;
 }
 
-/** Annotations de segurança para tools WebMCP */
+/** Security annotations for WebMCP tools */
 export interface ToolAnnotations {
-  /** Tool não altera estado (default: true para tools built-in) */
+  /** Tool does not mutate state (default: true for built-in tools) */
   readOnlyHint?: boolean;
-  /** Output pode conter conteúdo não-confiável (UGC, dados externos) */
+  /** Output may contain untrusted content (UGC, external data) */
   untrustedContentHint?: boolean;
 }
 
-/** Entrada no manifesto gerado */
+/**
+ * Structured content response per WebMCP spec.
+ * Tools return content as typed parts (currently only "text").
+ */
+export interface ToolContentResponse {
+  content: Array<{ type: string; text: string }>;
+}
+
+/** Entry in the generated manifest */
 export interface ManifestEntry {
   slug: string;
   url: string;
@@ -57,9 +83,11 @@ export interface ManifestEntry {
   description?: string;
   collection?: string;
   tags?: string[];
+  /** Heading IDs extracted from built HTML (for deep-linking) */
+  headings?: Array<{ id: string; text: string; level: number }>;
 }
 
-/** Manifesto completo gerado no build */
+/** Full manifest generated at build time */
 export interface WebMCPManifest {
   generatedAt: string;
   site?: string;

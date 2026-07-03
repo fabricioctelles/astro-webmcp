@@ -137,14 +137,14 @@ webmcp({
 ┌─────────────────────────────────────────────────────────┐
 │                    RUNTIME (Browser)                     │
 │                                                         │
-│  Injected script (injectScript)                         │
+│  Injected script (head-inline)                          │
 │       │                                                 │
 │       ├─ fetch('/_webmcp/manifest.json')                │
 │       │                                                 │
-│       └─ navigator.modelContext.registerTool()          │
+│       └─ document.modelContext.provideContext({ tools }) │
 │            ├── search_content                           │
 │            ├── list_sections                            │
-│            ├── go_to                                    │
+│            ├── go_to (+requestUserInteraction)           │
 │            └── get_page_info                            │
 └─────────────────────────────────────────────────────────┘
                           │
@@ -200,7 +200,29 @@ webmcp({
 | Static JSON manifest (not virtual module) | Works for both SSG and SSR, CDN-cacheable, no complex Vite plugin needed |
 | Client-side search | No server endpoint needed for small/medium sites (<1000 pages) |
 | Imperative API (not Declarative) | Search and navigation aren't forms — they need JS logic |
-| Feature detection with fallback | Chrome 149 uses `navigator.modelContext`, 150+ uses `document.modelContext` |
+| Feature detection with fallback | `document.modelContext` (spec) with `navigator.modelContext` fallback for Chrome 149 |
+
+## Spec conformance
+
+This integration tracks the [WebMCP spec](https://webmachinelearning.github.io/webmcp/) as it evolves. As of v0.4.0:
+
+| Spec feature | Status | Notes |
+|---|---|---|
+| `document.modelContext` (primary API) | ✅ | Falls back to `navigator.modelContext` for Chrome 149 |
+| `provideContext()` batch registration | ✅ | Falls back to `registerTool()` if unavailable |
+| `signal` / `AbortController` lifecycle | ✅ | Tools deregistered on `abort()` — ready for SPA navigation |
+| `requestUserInteraction()` | ✅ | Used in `go_to` before navigation (spec requirement for mutating tools) |
+| Structured content response | ✅ | Returns `{ content: [{ type: "text", text }] }` per spec |
+| `exposedTo` cross-origin control | ✅ | Same-origin by default |
+| `outputSchema` (Issue #9) | 🔄 | Type placeholder in `CustomTool` — not enforced yet by Chrome |
+| Declarative API (`toolname` attr) | ❌ | Not yet — will track spec's `SubmitEvent#respondWith()` |
+| Service Worker tools (Issue #212) | ❌ | Monitoring — relates to SSR middleware approach |
+| Progress reporting (Issue #196) | ❌ | Will integrate when API stabilizes |
+| Skills Integration (Issue #161) | 🔄 | `/.well-known/skills/index.json` already generated (prior art) |
+
+### `head-inline` script injection
+
+The client script is injected via `injectScript('head-inline')` which bypasses Vite bundling. This is more reliable than `'page'` on Astro 6.4.2+ where Vite could silently drop the script in certain build configurations.
 
 ## Testing
 
