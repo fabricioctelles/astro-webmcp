@@ -6,6 +6,8 @@ export interface WebMCPOptions {
   customTools?: CustomTool[];
   /** Security options */
   security?: SecurityOptions;
+  /** Search backend configuration for search_content tool */
+  search?: SearchOptions;
   /**
    * Generate /.well-known/skills/index.json for Agent Skills Discovery.
    * Set to false to disable. Default: true.
@@ -16,6 +18,26 @@ export interface WebMCPOptions {
   skillsName?: string;
   /** Description for the skills index */
   skillsDescription?: string;
+}
+
+/**
+ * Search backend options for the search_content tool.
+ * Inspired by @freshjuice/astro-webmcp.
+ */
+export interface SearchOptions {
+  /**
+   * Search backend for search_content.
+   * - 'manifest': substring search on the generated manifest (default, always works)
+   * - 'pagefind': full-text search via window.pagefind (requires astro-pagefind or pagefind)
+   * - 'orama': full-text search via @orama/orama with a pre-built index
+   *
+   * All backends fall back to manifest search if the primary backend fails.
+   */
+  backend?: 'manifest' | 'pagefind' | 'orama';
+  /** URL of the serialized Orama index JSON (required when backend='orama') */
+  oramaIndexUrl?: string;
+  /** Pagefind bundle path (default: '/pagefind/') */
+  pagefindBundlePath?: string;
 }
 
 /**
@@ -53,7 +75,16 @@ export interface CustomTool {
    * Not yet enforced by Chrome — included for forward compatibility.
    */
   outputSchema?: Record<string, unknown>;
-  /** Serialized execute function body (runs in browser) */
+  /**
+   * Serialized execute function body (runs in browser).
+   * Receives `params` (tool arguments) and `safeOutput` (sanitize+truncate helper).
+   * Must return data or a Promise.
+   *
+   * @example
+   * executeBody: `return fetch('/api/search?q=' + encodeURIComponent(params.query))
+   *   .then(r => r.json())
+   *   .then(d => safeOutput(d));`
+   */
   executeBody: string;
   /** Security annotations */
   annotations?: ToolAnnotations;
@@ -85,6 +116,16 @@ export interface ManifestEntry {
   tags?: string[];
   /** Heading IDs extracted from built HTML (for deep-linking) */
   headings?: Array<{ id: string; text: string; level: number }>;
+  /** OpenGraph title (if different from <title>) */
+  ogTitle?: string;
+  /** OpenGraph description */
+  ogDescription?: string;
+  /** Canonical URL */
+  canonical?: string;
+  /** Page language (from <html lang>) */
+  lang?: string;
+  /** Approximate word count of main content */
+  wordCount?: number;
 }
 
 /** Full manifest generated at build time */

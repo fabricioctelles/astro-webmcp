@@ -44,6 +44,33 @@ That's it. All your site content is now exposed via WebMCP automatically.
 ```js
 webmcp({
   collections: ['blog', 'docs'], // filter which collections to expose (default: all)
+
+  // Custom tools — expose your own domain-specific functionality
+  customTools: [
+    {
+      name: 'search_products',
+      description: 'Search the product catalog by name or keyword.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search term' },
+        },
+        required: ['query'],
+      },
+      executeBody: `return fetch('/api/search?q=' + encodeURIComponent(params.query))
+        .then(r => r.json())
+        .then(d => safeOutput(d));`,
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+    },
+  ],
+
+  // Search backend for search_content tool (default: 'manifest')
+  search: {
+    backend: 'pagefind',       // 'manifest' | 'pagefind' | 'orama'
+    pagefindBundlePath: '/pagefind/',
+    // oramaIndexUrl: '/search-index.json',  // required for 'orama'
+  },
+
   security: {
     exposedTo: [],          // origins allowed cross-origin access (default: none)
     maxOutputLength: 1500,  // max chars per tool output (default: 1500)
@@ -55,18 +82,39 @@ webmcp({
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `collections` | `string[]` | `undefined` (all) | List of collections to include in the manifest |
+| `customTools` | `CustomTool[]` | `[]` | Domain-specific tools registered alongside built-in ones |
+| `search.backend` | `'manifest' \| 'pagefind' \| 'orama'` | `'manifest'` | Search backend for `search_content` |
+| `search.pagefindBundlePath` | `string` | `'/pagefind/'` | Pagefind bundle path |
+| `search.oramaIndexUrl` | `string` | — | URL of pre-built Orama index (required for `'orama'`) |
 | `security.exposedTo` | `string[]` | `[]` | Origins allowed to access tools cross-origin |
 | `security.maxOutputLength` | `number` | `1500` | Character limit per tool output |
 | `security.sanitizeOutputs` | `boolean` | `true` | Strip patterns that resemble prompt injection |
+
+### Custom tools
+
+Each custom tool needs: `name`, `description`, `inputSchema` (JSON Schema), `executeBody` (function body as string), and optional `annotations`. The `executeBody` runs in the browser and receives `params` (tool arguments) and `safeOutput` (sanitization helper). Must return data or a Promise.
+
+### Search backends
+
+`search_content` supports three backends with automatic fallback to manifest:
+
+| Backend | Description | Requires |
+|---------|-------------|----------|
+| `manifest` (default) | Substring search on the generated manifest | Nothing — always works |
+| `pagefind` | Full-text search via Pagefind | `astro-pagefind` or `pagefind` loaded on the page |
+| `orama` | Full-text search via Orama | `@orama/orama` + pre-built index at `oramaIndexUrl` |
+
+If the configured backend returns no results or fails, it falls back to manifest search automatically.
 
 ## Registered tools
 
 | Tool | Description |
 |------|-------------|
-| `search_content` | Search articles and pages by keyword |
+| `search_content` | Search articles and pages by keyword (supports manifest, Pagefind, or Orama backends) |
 | `list_sections` | List available content sections with item counts |
-| `go_to` | Navigate to a specific page by slug |
-| `get_page_info` | Get current page metadata (title, description, headings) |
+| `go_to` | Navigate to a specific page by slug (prompts user consent via `requestUserInteraction`) |
+| `get_page_info` | Get current page metadata (title, description, headings, language, word count, canonical URL) |
+| *your custom tools* | Whatever you define via `customTools` |
 
 ### Tool schemas
 
@@ -509,6 +557,10 @@ If you are building an agent that consumes tools registered by `astro-webmcp`, f
 ## Status
 
 🚧 Early development — WebMCP is an evolving standard (developer trial in Chrome 149+).
+
+## Acknowledgments
+
+The custom tools API, search backends (Pagefind/Orama), and enhanced metadata extraction were inspired by the [`@freshjuice/astro-webmcp`](https://github.com/freshjuice-dev/astro-webmcp) fork maintained by [Alex Zappa](https://alex.zappa.dev/) at [FreshJuice](https://freshjuice.dev). Their work identified the `head-inline` injection fix and explored extensibility patterns that informed v0.5.0 of this package.
 
 ## License
 

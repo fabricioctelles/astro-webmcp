@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { SecurityOptions, WebMCPManifest, WebMCPOptions } from './types.js';
+import type { CustomTool, SearchOptions, SecurityOptions, WebMCPManifest, WebMCPOptions } from './types.js';
 
-export type { WebMCPOptions, CustomTool, ManifestEntry, WebMCPManifest, SecurityOptions, ToolAnnotations, ToolContentResponse } from './types.js';
+export type { WebMCPOptions, CustomTool, ManifestEntry, WebMCPManifest, SecurityOptions, SearchOptions, ToolAnnotations, ToolContentResponse } from './types.js';
 
 /**
  * Astro integration que expõe conteúdo do site via WebMCP.
@@ -54,7 +54,18 @@ export default function astroWebMCP(options: WebMCPOptions = {}): AstroIntegrati
           });
         }
 
-        const configScript = `globalThis.__WEBMCP_CONFIG__=${JSON.stringify(security)};`;
+        const customTools = options.customTools ?? [];
+        const search: SearchOptions = {
+          backend: options.search?.backend ?? 'manifest',
+          oramaIndexUrl: options.search?.oramaIndexUrl,
+          pagefindBundlePath: options.search?.pagefindBundlePath ?? '/pagefind/',
+        };
+
+        const configScript = `globalThis.__WEBMCP_CONFIG__=${JSON.stringify({
+          ...security,
+          customTools,
+          search,
+        })};`;
 
         let clientCode: string;
         try {
@@ -192,8 +203,21 @@ function buildSkillsIndex(
   };
 }
 
-/** Extracts title, description, and heading IDs from generated HTML */
-function extractMeta(dir: URL, pathname: string): { title: string; description: string; headings?: Array<{ id: string; text: string; level: number }> } {
+/**
+ * Extracts title, description, headings, tags, OG metadata, canonical, lang, and word count
+ * from generated HTML. Enhanced metadata inspired by @freshjuice/astro-webmcp.
+ */
+function extractMeta(dir: URL, pathname: string): {
+  title: string;
+  description: string;
+  headings?: Array<{ id: string; text: string; level: number }>;
+  tags?: string[];
+  ogTitle?: string;
+  ogDescription?: string;
+  canonical?: string;
+  lang?: string;
+  wordCount?: number;
+} {
   try {
     const htmlPath = join(fileURLToPath(dir), pathname, 'index.html');
     const html = readFileSync(htmlPath, 'utf-8');
@@ -201,18 +225,55 @@ function extractMeta(dir: URL, pathname: string): { title: string; description: 
     const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
     const descMatch = html.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i);
 
-    // v7 Sätteri generates heading IDs by default — extract them for deep-linking
+    // OpenGraph metadata
+    const ogTitleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i);
+    const ogDescMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+
+    // Canonical URL
+    const canonicalMatch = html.match(/<link\s+rel=["']canonical["']\s+href=["']([^"']+)["']/i);
+
+    // Language
+    const langMatch = html.match(/<html[^>]*\slang=["']([^"']+)["']/i);
+
+    // Tags from <meta name="keywords"> and <a rel="tag">
+    const tags: string[] = [];
+    const keywordsMatch = html.match(/<meta\s+name=["']keywords["']\s+content=["']([^"']+)["']/i);
+    if (keywordsMatch?.[1]) {
+      tags.push(...keywordsMatch[1].split(',').map(t => t.trim()).filter(Boolean));
+    }
+    const articleTagRegex = /<a[^>]+rel=["']tag["'][^>]*>([^<]+)<\/a>/gi;
+    let tagMatch: RegExpExecArray | null;
+    while ((tagMatch = articleTagRegex.exec(html)) !== null) {
+      const tag = tagMatch[1].trim();
+      if (tag && !tags.includes(tag)) tags.push(tag);
+    }
+
+    // Heading IDs for deep-linking
     const headings: Array<{ id: string; text: string; level: number }> = [];
     const headingRegex = /<h([1-3])\s+id=["']([^"']+)["'][^>]*>([^<]+)<\/h\1>/gi;
-    let match: RegExpExecArray | null;
-    while ((match = headingRegex.exec(html)) !== null) {
-      headings.push({ level: parseInt(match[1]), id: match[2], text: match[3].trim() });
+    let hMatch: RegExpExecArray | null;
+    while ((hMatch = headingRegex.exec(html)) !== null) {
+      headings.push({ level: parseInt(hMatch[1]), id: hMatch[2], text: hMatch[3].trim() });
+    }
+
+    // Word count from <main> content
+    let wordCount: number | undefined;
+    const mainMatch = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+    if (mainMatch?.[1]) {
+      const text = mainMatch[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      wordCount = text.split(/\s+/).length;
     }
 
     return {
       title: titleMatch?.[1]?.trim() ?? pathname.split('/').filter(Boolean).pop() ?? 'Home',
       description: descMatch?.[1]?.trim() ?? '',
       ...(headings.length > 0 ? { headings } : {}),
+      ...(tags.length > 0 ? { tags } : {}),
+      ogTitle: ogTitleMatch?.[1]?.trim() || undefined,
+      ogDescription: ogDescMatch?.[1]?.trim() || undefined,
+      canonical: canonicalMatch?.[1]?.trim() || undefined,
+      lang: langMatch?.[1]?.trim() || undefined,
+      wordCount,
     };
   } catch {
     return {

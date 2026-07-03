@@ -1,6 +1,6 @@
 {
   "name": "astro-webmcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Astro integration that exposes your site content via WebMCP for AI agents",
   "type": "module",
   "main": "./dist/index.js",
@@ -25,15 +25,25 @@
     "mcp",
     "model-context-protocol",
     "seo",
+    "aeo",
     "optimization",
     "security",
-    "prompt-injection"
+    "prompt-injection",
+    "pagefind",
+    "orama"
   ],
   "homepage": "https://github.com/fabricioctelles/astro-webmcp",
   "repository": {
     "type": "git",
     "url": "https://github.com/fabricioctelles/astro-webmcp.git"
   },
+  "contributors": [
+    {
+      "name": "FreshJuice (Alex Zappa)",
+      "url": "https://freshjuice.dev",
+      "note": "Custom tools API, search backends (Pagefind/Orama), enhanced metadata"
+    }
+  ],
   "license": "MIT",
   "peerDependencies": {
     "astro": "^6.0.0 || ^7.0.0"
