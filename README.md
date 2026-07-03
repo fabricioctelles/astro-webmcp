@@ -252,14 +252,96 @@ This plugin uses the Imperative API for search and navigation. For existing form
 
 The agent will see **both** the integration tools + declarative form tools.
 
-## Compatibility
+## Browser support
 
-| Browser | Support |
-|---------|---------|
-| Chrome 149+ | ✅ (flag or origin trial) |
-| Other browsers | ❌ (script exits immediately, zero impact) |
+| Browser | Status |
+|---------|--------|
+| Chrome 149+ | ✅ Supported (flag or origin trial) |
+| Edge | 🔄 Expected H2 2026 (Microsoft actively collaborating on the spec) |
+| Other browsers | ❌ Script exits silently, zero overhead |
 
-The plugin is a **progressive enhancement** — sites continue working normally on unsupported browsers.
+The integration is a progressive enhancement. On unsupported browsers, the injected script detects the absence of `navigator.modelContext` / `document.modelContext` and exits immediately. No errors thrown, no extra bytes parsed.
+
+### Enabling WebMCP
+
+WebMCP requires explicit opt-in. There are two paths depending on your use case:
+
+#### Local development: Chrome flag
+
+For testing on your own machine:
+
+1. Open `chrome://flags/#enable-webmcp-testing`
+2. Set to **Enabled**
+3. Restart Chrome
+
+Tools will appear for any localhost site that registers them. No token needed.
+
+#### Production: Origin Trial
+
+For deployed sites where real visitors should have WebMCP active (without requiring them to flip a flag), Chrome offers an [Origin Trial](https://developer.chrome.com/origintrials/#/register_trial/4163014905550602241).
+
+**Step 1 — Register your origin**
+
+Go to the [WebMCP Origin Trial registration page](https://developer.chrome.com/origintrials/#/register_trial/4163014905550602241) and register the domain(s) where your Astro site is deployed (e.g. `https://mysite.com`). You'll receive a trial token — a long Base64 string.
+
+**Step 2 — Store the token**
+
+Add the token to your `.env` file:
+
+```bash
+# .env
+WEBMCP_ORIGIN_TRIAL_TOKEN=AjfC0e...your-long-token-here...Qw==
+```
+
+Never hardcode the token in source. It's tied to a specific origin and has an expiration date — keeping it in `.env` makes rotation easy.
+
+**Step 3 — Inject the meta tag**
+
+In your base layout (typically `src/layouts/Layout.astro` or `src/layouts/Base.astro`), add the origin trial meta tag inside `<head>`:
+
+```astro
+---
+// src/layouts/Layout.astro
+---
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    {/* WebMCP Origin Trial — enables navigator.modelContext for visitors */}
+    {import.meta.env.WEBMCP_ORIGIN_TRIAL_TOKEN && (
+      <meta
+        http-equiv="origin-trial"
+        content={import.meta.env.WEBMCP_ORIGIN_TRIAL_TOKEN}
+      />
+    )}
+
+    <title>My Site</title>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>
+```
+
+The conditional (`&&`) means the tag only renders when the token exists — development builds without the env var won't emit an empty meta tag.
+
+**Step 4 — Verify**
+
+After deploying, open DevTools → Application → Frames → top → Origin Trials. You should see "WebMCP" listed as active. Alternatively, check the Console:
+
+```js
+// Should return the registered tools if everything works
+const tools = await navigator.modelContext.getTools();
+console.log(tools.length, 'WebMCP tools active');
+```
+
+#### Origin trial caveats
+
+- Tokens are **origin-bound** — `https://mysite.com` and `https://staging.mysite.com` need separate tokens.
+- Tokens **expire** (typically 6-12 weeks). Chrome will email you before expiration. Renew and update your `.env`.
+- The trial is available starting Chrome 149. Users on older Chrome versions simply won't have `modelContext` — the integration handles this gracefully.
+- Native support (no flag or token) is targeted for H2 2026.
 
 ## Security
 
@@ -399,7 +481,7 @@ If you are building an agent that consumes tools registered by `astro-webmcp`, f
 ## Requirements
 
 - Astro 6+
-- Chrome 149+ with `chrome://flags/#enable-webmcp-testing` enabled (or origin trial)
+- Chrome 149+ with WebMCP enabled — see [Browser support](#browser-support) for setup options
 - Origin-isolated document (Astro default)
 
 ## Status
